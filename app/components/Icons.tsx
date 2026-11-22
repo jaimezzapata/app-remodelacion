@@ -82,3 +82,11 @@ export function IconChevronRight({ className = "w-4 h-4" }: IconProps) {
     </svg>
   );
 }
+
+export function IconFolder({ className = "w-4 h-4" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" className={className}>
+      <path d="M3 6h7l2 2h9v11H3V6z" strokeLinecap="square" />
+    </svg>
+  );
+}

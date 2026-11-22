@@ -3,12 +3,19 @@
 import React, { useState } from "react";
 import type { ProjectConfig } from "../lib/types";
 import { formatCOP } from "../lib/initial-data";
+import { IconFolder } from "./Icons";
 
 interface OnboardingScreenProps {
+  existingCount: number;
   onStartBlank: (project: ProjectConfig) => void;
+  onOpenProjects: () => void;
 }
 
-export function OnboardingScreen({ onStartBlank }: OnboardingScreenProps) {
+export function OnboardingScreen({
+  existingCount,
+  onStartBlank,
+  onOpenProjects,
+}: OnboardingScreenProps) {
   const [name, setName] = useState("");
   const [budgetStr, setBudgetStr] = useState("");
 
@@ -36,9 +43,15 @@ export function OnboardingScreen({ onStartBlank }: OnboardingScreenProps) {
             Obra
           </span>
         </div>
-        <span className="text-[10px] uppercase tracking-[0.14em] text-[#9E9B93]">
-          Nuevo proyecto
-        </span>
+
+        <button
+          type="button"
+          onClick={onOpenProjects}
+          className="px-3 h-8 bg-white border border-[#141413] text-[10px] font-medium uppercase tracking-[0.12em] text-[#141413] inline-flex items-center gap-1.5 hover:bg-[#141413] hover:text-white transition-colors"
+        >
+          <IconFolder className="w-3.5 h-3.5" />
+          <span>{existingCount > 0 ? `Proyectos (${existingCount})` : "Proyectos"}</span>
+        </button>
       </div>
 
       {/* Center Form */}
@@ -104,7 +117,7 @@ export function OnboardingScreen({ onStartBlank }: OnboardingScreenProps) {
       {/* Bottom minimal note */}
       <div className="max-w-md w-full mx-auto text-center">
         <span className="text-[10px] uppercase tracking-[0.12em] text-[#9E9B93]">
-          Tus datos se guardan en este dispositivo
+          Funciona sin conexión y sincroniza al tener internet
         </span>
       </div>
     </div>

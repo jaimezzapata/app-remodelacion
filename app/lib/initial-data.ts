@@ -11,12 +11,19 @@ export const DEFAULT_CATEGORIES = [
 ];
 
 export const DEFAULT_PAYMENT_METHODS = [
+  "TC",
+  "Addi",
+  "Sistecredito",
   "Transferencia",
   "Efectivo",
-  "Tarjeta Crédito",
-  "Tarjeta Débito",
   "Nequi",
 ];
+
+export function formatPaymentBadge(method: string, owner?: string): string {
+  if (!method) return "";
+  if (!owner || owner === "Propio") return `${method} · Propio`;
+  return `${method} · ${owner}`;
+}
 
 export const ARCHITECTURAL_PALETTE = [
   "#141413", // Charcoal Ink

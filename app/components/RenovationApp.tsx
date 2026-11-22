@@ -1,17 +1,19 @@
 "use client";
 
-import React, { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ActiveTab, ExpenseItem, ProjectConfig } from "../lib/types";
 import {
   ARCHITECTURAL_PALETTE,
   KIND_COLORS,
   formatCOP,
+  formatPaymentBadge,
   formatQty,
 } from "../lib/initial-data";
 import { DonutChart } from "./DonutChart";
 import { ExpenseModal } from "./ExpenseModal";
 import { OnboardingScreen } from "./OnboardingScreen";
 import { ProjectSettingsModal } from "./ProjectSettingsModal";
+import { ProjectsModal, type ProjectSummary } from "./ProjectsModal";
 import {
   exportBackupJSON,
   exportToExcel,
@@ -19,6 +21,7 @@ import {
 } from "../lib/export-utils";
 import {
   IconChevronRight,
+  IconFolder,
   IconList,
   IconOverview,
   IconPie,
@@ -29,8 +32,19 @@ import {
 
 const STORAGE_EXPENSES_KEY = "tierralta318_expenses_v1";
 const STORAGE_PROJECT_KEY = "tierralta318_project_v1";
+const STORAGE_ACTIVE_ID_KEY = "tierralta318_active_project_id_v1";
+const STORAGE_PROJECTS_INDEX_KEY = "tierralta318_projects_index_v1";
 const STORAGE_ONBOARDED_KEY = "tierralta318_onboarded_v1";
+const STORAGE_DIRTY_KEY = "tierralta318_sync_dirty_v1";
+const STORAGE_DELETED_KEY = "tierralta318_deleted_ids_v1";
+const STORAGE_RESET_KEY = "tierralta318_reset_pending_v1";
 const STORAGE_EVENT = "tierralta318-storage";
+
+type SyncStatus = "synced" | "syncing" | "offline" | "idle";
+
+function getProjectCacheKey(id: string, kind: "config" | "expenses") {
+  return `tierralta318_cache_${id}_${kind}`;
+}
 
 function subscribeStorage(callback: () => void) {
   window.addEventListener(STORAGE_EVENT, callback);
@@ -112,31 +126,311 @@ export function RenovationApp() {
     }
   }, [projectRaw]);
 
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
+  const syncingRef = useRef(false);
+  const [projectsOpen, setProjectsOpen] = useState(false);
+  const [projectsList, setProjectsList] = useState<ProjectSummary[]>([]);
+  const [loadingProjects, setLoadingProjects] = useState(false);
+
+  const getActiveProjectId = useCallback((): string => {
+    try {
+      return localStorage.getItem(STORAGE_ACTIVE_ID_KEY) || "default";
+    } catch {
+      return "default";
+    }
+  }, []);
+
+  const updateLocalProjectsIndex = useCallback(
+    (projId: string, proj: ProjectConfig, exp: ExpenseItem[]) => {
+      try {
+        localStorage.setItem(getProjectCacheKey(projId, "config"), JSON.stringify(proj));
+        localStorage.setItem(getProjectCacheKey(projId, "expenses"), JSON.stringify(exp));
+
+        const rawIdx = localStorage.getItem(STORAGE_PROJECTS_INDEX_KEY);
+        const list: ProjectSummary[] = rawIdx ? JSON.parse(rawIdx) : [];
+        const totalSpent = exp.reduce(
+          (sum, e) => sum + (e.status === "pagado" ? e.amount : 0),
+          0
+        );
+        const summary: ProjectSummary = {
+          id: projId,
+          name: proj.name,
+          budget: proj.budget,
+          expenseCount: exp.length,
+          totalSpent,
+          updatedAt: new Date().toISOString(),
+        };
+        const nextList = [summary, ...list.filter((p) => p.id !== projId)];
+        localStorage.setItem(STORAGE_PROJECTS_INDEX_KEY, JSON.stringify(nextList));
+        setProjectsList(nextList);
+      } catch {
+        // Ignore storage errors
+      }
+    },
+    []
+  );
+
+  const fetchProjectsList = useCallback(async () => {
+    setLoadingProjects(true);
+    try {
+      const rawIdx = localStorage.getItem(STORAGE_PROJECTS_INDEX_KEY);
+      const localList: ProjectSummary[] = rawIdx ? JSON.parse(rawIdx) : [];
+      if (localList.length > 0) setProjectsList(localList);
+
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        setLoadingProjects(false);
+        return;
+      }
+      const res = await fetch("/api/projects");
+      if (res.ok) {
+        const data = await res.json();
+        const remoteList: ProjectSummary[] = Array.isArray(data.projects)
+          ? data.projects
+          : [];
+        // Merge remote + any unsynced local projects
+        const mergedMap = new Map<string, ProjectSummary>();
+        for (const p of remoteList) mergedMap.set(p.id, p);
+        for (const p of localList) {
+          if (!mergedMap.has(p.id)) mergedMap.set(p.id, p);
+        }
+        const merged = Array.from(mergedMap.values()).sort((a, b) =>
+          b.updatedAt.localeCompare(a.updatedAt)
+        );
+        localStorage.setItem(STORAGE_PROJECTS_INDEX_KEY, JSON.stringify(merged));
+        setProjectsList(merged);
+      }
+    } catch {
+      // Ignore network errors
+    } finally {
+      setLoadingProjects(false);
+    }
+  }, []);
+
+  const pushSync = useCallback(async () => {
+    if (syncingRef.current) return;
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      setSyncStatus("offline");
+      return;
+    }
+
+    const activeId = getActiveProjectId();
+    const resetPending = localStorage.getItem(STORAGE_RESET_KEY) === "1";
+    const isDirty = localStorage.getItem(STORAGE_DIRTY_KEY) === "1";
+    if (!resetPending && !isDirty) return;
+
+    syncingRef.current = true;
+    setSyncStatus("syncing");
+    try {
+      if (resetPending) {
+        const res = await fetch("/api/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ projectId: activeId, deleteProject: true }),
+        });
+        if (res.ok) {
+          localStorage.removeItem(STORAGE_RESET_KEY);
+          localStorage.removeItem(STORAGE_DIRTY_KEY);
+          localStorage.removeItem(STORAGE_DELETED_KEY);
+          setSyncStatus("synced");
+        } else {
+          setSyncStatus("offline");
+        }
+        return;
+      }
+
+      const rawProject = localStorage.getItem(STORAGE_PROJECT_KEY);
+      const rawExpenses = localStorage.getItem(STORAGE_EXPENSES_KEY);
+      const rawDeleted = localStorage.getItem(STORAGE_DELETED_KEY);
+
+      const proj: ProjectConfig = rawProject
+        ? JSON.parse(rawProject)
+        : { name: "MI REMODELACIÓN", budget: null };
+      const exp: ExpenseItem[] = rawExpenses ? JSON.parse(rawExpenses) : [];
+      const deletedIds: string[] = rawDeleted ? JSON.parse(rawDeleted) : [];
+
+      const res = await fetch("/api/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId: activeId, project: proj, expenses: exp, deletedIds }),
+      });
+
+      if (res.ok) {
+        localStorage.removeItem(STORAGE_DIRTY_KEY);
+        localStorage.removeItem(STORAGE_DELETED_KEY);
+        setSyncStatus("synced");
+      } else {
+        setSyncStatus("offline");
+      }
+    } catch {
+      setSyncStatus("offline");
+    } finally {
+      syncingRef.current = false;
+    }
+  }, [getActiveProjectId]);
+
+  const pullSync = useCallback(async () => {
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      setSyncStatus("offline");
+      void fetchProjectsList();
+      return;
+    }
+    const isDirty = localStorage.getItem(STORAGE_DIRTY_KEY) === "1";
+    const resetPending = localStorage.getItem(STORAGE_RESET_KEY) === "1";
+    if (isDirty || resetPending) {
+      await pushSync();
+      await fetchProjectsList();
+      return;
+    }
+
+    const activeId = getActiveProjectId();
+    try {
+      const res = await fetch(`/api/sync?projectId=${encodeURIComponent(activeId)}`);
+      if (!res.ok) {
+        setSyncStatus("offline");
+        return;
+      }
+      const data = await res.json();
+      if (data.exists && data.project) {
+        const expList = Array.isArray(data.expenses) ? data.expenses : [];
+        localStorage.setItem(STORAGE_PROJECT_KEY, JSON.stringify(data.project));
+        localStorage.setItem(STORAGE_EXPENSES_KEY, JSON.stringify(expList));
+        localStorage.setItem(STORAGE_ONBOARDED_KEY, "1");
+        updateLocalProjectsIndex(activeId, data.project, expList);
+        window.dispatchEvent(new Event(STORAGE_EVENT));
+      }
+      setSyncStatus("synced");
+      await fetchProjectsList();
+    } catch {
+      setSyncStatus("offline");
+    }
+  }, [fetchProjectsList, getActiveProjectId, pushSync, updateLocalProjectsIndex]);
+
   function startBlankProject(newProject: ProjectConfig) {
     try {
+      const newId = `proj-${Date.now()}`;
+      localStorage.setItem(STORAGE_ACTIVE_ID_KEY, newId);
       localStorage.setItem(STORAGE_PROJECT_KEY, JSON.stringify(newProject));
       localStorage.setItem(STORAGE_EXPENSES_KEY, JSON.stringify([]));
       localStorage.setItem(STORAGE_ONBOARDED_KEY, "1");
+      localStorage.setItem(STORAGE_DIRTY_KEY, "1");
+      localStorage.removeItem(STORAGE_RESET_KEY);
+      updateLocalProjectsIndex(newId, newProject, []);
       window.dispatchEvent(new Event(STORAGE_EVENT));
+      void pushSync();
     } catch {
       // Ignore storage errors
     }
   }
 
-  function updateExpenses(updater: (prev: ExpenseItem[]) => ExpenseItem[]) {
+  async function handleSelectProject(projectId: string) {
+    setProjectsOpen(false);
+    try {
+      localStorage.setItem(STORAGE_ACTIVE_ID_KEY, projectId);
+      const cachedProj = localStorage.getItem(getProjectCacheKey(projectId, "config"));
+      const cachedExp = localStorage.getItem(getProjectCacheKey(projectId, "expenses"));
+
+      if (cachedProj) {
+        localStorage.setItem(STORAGE_PROJECT_KEY, cachedProj);
+        localStorage.setItem(STORAGE_EXPENSES_KEY, cachedExp || "[]");
+        localStorage.setItem(STORAGE_ONBOARDED_KEY, "1");
+        window.dispatchEvent(new Event(STORAGE_EVENT));
+      }
+
+      if (typeof navigator === "undefined" || navigator.onLine) {
+        const res = await fetch(`/api/sync?projectId=${encodeURIComponent(projectId)}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.exists && data.project) {
+            const expList = Array.isArray(data.expenses) ? data.expenses : [];
+            localStorage.setItem(STORAGE_PROJECT_KEY, JSON.stringify(data.project));
+            localStorage.setItem(STORAGE_EXPENSES_KEY, JSON.stringify(expList));
+            localStorage.setItem(STORAGE_ONBOARDED_KEY, "1");
+            updateLocalProjectsIndex(projectId, data.project, expList);
+            window.dispatchEvent(new Event(STORAGE_EVENT));
+          }
+        }
+      }
+      setActiveTab("resumen");
+      setSearch("");
+      setStatusFilter("todos");
+      setCategoryFilter("Todas");
+      setOwnerFilter("Todos");
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  async function handleDeleteProjectById(projectId: string) {
+    try {
+      localStorage.removeItem(getProjectCacheKey(projectId, "config"));
+      localStorage.removeItem(getProjectCacheKey(projectId, "expenses"));
+      const rawIdx = localStorage.getItem(STORAGE_PROJECTS_INDEX_KEY);
+      const list: ProjectSummary[] = rawIdx ? JSON.parse(rawIdx) : [];
+      const nextList = list.filter((p) => p.id !== projectId);
+      localStorage.setItem(STORAGE_PROJECTS_INDEX_KEY, JSON.stringify(nextList));
+      setProjectsList(nextList);
+
+      if (typeof navigator === "undefined" || navigator.onLine) {
+        await fetch("/api/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ projectId, deleteProject: true }),
+        });
+      }
+
+      if (projectId === getActiveProjectId()) {
+        if (nextList.length > 0) {
+          await handleSelectProject(nextList[0].id);
+        } else {
+          localStorage.removeItem(STORAGE_EXPENSES_KEY);
+          localStorage.removeItem(STORAGE_PROJECT_KEY);
+          localStorage.removeItem(STORAGE_ONBOARDED_KEY);
+          localStorage.removeItem(STORAGE_ACTIVE_ID_KEY);
+          window.dispatchEvent(new Event(STORAGE_EVENT));
+          setProjectsOpen(false);
+        }
+      }
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  function updateExpenses(
+    updater: (prev: ExpenseItem[]) => ExpenseItem[],
+    deletedId?: string
+  ) {
     const next = updater(expenses);
+    const activeId = getActiveProjectId();
     try {
       localStorage.setItem(STORAGE_EXPENSES_KEY, JSON.stringify(next));
+      localStorage.setItem(STORAGE_DIRTY_KEY, "1");
+      if (deletedId) {
+        const prevDeleted: string[] = JSON.parse(
+          localStorage.getItem(STORAGE_DELETED_KEY) ?? "[]"
+        );
+        if (!prevDeleted.includes(deletedId)) {
+          localStorage.setItem(
+            STORAGE_DELETED_KEY,
+            JSON.stringify([...prevDeleted, deletedId])
+          );
+        }
+      }
+      updateLocalProjectsIndex(activeId, project, next);
       window.dispatchEvent(new Event(STORAGE_EVENT));
+      void pushSync();
     } catch {
       // Ignore storage errors
     }
   }
 
   function updateProject(next: ProjectConfig) {
+    const activeId = getActiveProjectId();
     try {
       localStorage.setItem(STORAGE_PROJECT_KEY, JSON.stringify(next));
+      localStorage.setItem(STORAGE_DIRTY_KEY, "1");
+      updateLocalProjectsIndex(activeId, next, expenses);
       window.dispatchEvent(new Event(STORAGE_EVENT));
+      void pushSync();
     } catch {
       // Ignore storage errors
     }
@@ -148,6 +442,7 @@ export function RenovationApp() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<"todos" | "pagado" | "pendiente">("todos");
   const [categoryFilter, setCategoryFilter] = useState<string>("Todas");
+  const [ownerFilter, setOwnerFilter] = useState<string>("Todos");
 
   // Modals
   const [modalOpen, setModalOpen] = useState(false);
@@ -158,7 +453,27 @@ export function RenovationApp() {
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
     }
-  }, []);
+
+    const handleOnline = () => {
+      void pushSync();
+    };
+    const handleOffline = () => {
+      setSyncStatus("offline");
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    const timer = setTimeout(() => {
+      void pullSync();
+    }, 0);
+
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, [pullSync, pushSync]);
 
   // Derived Totals
   const totals = useMemo(() => {
@@ -198,6 +513,30 @@ export function RenovationApp() {
 
   const existingPaymentMethods = useMemo(
     () => Array.from(new Set(expenses.map((e) => e.paymentMethod).filter(Boolean))),
+    [expenses]
+  );
+
+  const existingOwners = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          expenses
+            .map((e) => e.paymentOwner)
+            .filter((o): o is string => Boolean(o && o !== "Propio"))
+        )
+      ),
+    [expenses]
+  );
+
+  const allOwnersInExpenses = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          expenses
+            .filter((e) => e.status === "pagado")
+            .map((e) => e.paymentOwner || "Propio")
+        )
+      ),
     [expenses]
   );
 
@@ -241,6 +580,26 @@ export function RenovationApp() {
       .sort((a, b) => b.total - a.total);
   }, [expenses]);
 
+  const ownerSlices = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const item of expenses) {
+      if (item.status === "pagado" && item.amount > 0) {
+        const key = item.paymentOwner || "Propio";
+        map.set(key, (map.get(key) ?? 0) + item.amount);
+      }
+    }
+    return Array.from(map.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, value], idx) => ({
+        label,
+        value,
+        color:
+          label === "Propio"
+            ? "#141413"
+            : ARCHITECTURAL_PALETTE[(idx + 1) % ARCHITECTURAL_PALETTE.length],
+      }));
+  }, [expenses]);
+
   const topExpenses = useMemo(
     () =>
       expenses
@@ -270,8 +629,12 @@ export function RenovationApp() {
     const filtered = expenses.filter((item) => {
       if (statusFilter !== "todos" && item.status !== statusFilter) return false;
       if (categoryFilter !== "Todas" && item.category !== categoryFilter) return false;
+      if (ownerFilter !== "Todos") {
+        const itemOwner = item.paymentOwner || "Propio";
+        if (item.status !== "pagado" || itemOwner !== ownerFilter) return false;
+      }
       if (q) {
-        const hay = `${item.name} ${item.category} ${item.paymentMethod}`.toLowerCase();
+        const hay = `${item.name} ${item.category} ${item.paymentMethod} ${item.paymentOwner ?? ""}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -289,7 +652,7 @@ export function RenovationApp() {
       items,
       subtotal: items.reduce((sum, i) => sum + (i.status === "pagado" ? i.amount : 0), 0),
     }));
-  }, [expenses, search, statusFilter, categoryFilter]);
+  }, [expenses, search, statusFilter, categoryFilter, ownerFilter]);
 
   function openNewModal() {
     setEditingItem(null);
@@ -314,7 +677,7 @@ export function RenovationApp() {
   }
 
   function handleDeleteExpense(id: string) {
-    updateExpenses((prev) => prev.filter((e) => e.id !== id));
+    updateExpenses((prev) => prev.filter((e) => e.id !== id), id);
     setModalOpen(false);
     setEditingItem(null);
   }
@@ -334,11 +697,16 @@ export function RenovationApp() {
       localStorage.removeItem(STORAGE_EXPENSES_KEY);
       localStorage.removeItem(STORAGE_PROJECT_KEY);
       localStorage.removeItem(STORAGE_ONBOARDED_KEY);
+      localStorage.removeItem(STORAGE_DIRTY_KEY);
+      localStorage.removeItem(STORAGE_DELETED_KEY);
+      localStorage.setItem(STORAGE_RESET_KEY, "1");
       window.dispatchEvent(new Event(STORAGE_EVENT));
       setActiveTab("resumen");
       setSearch("");
       setStatusFilter("todos");
       setCategoryFilter("Todas");
+      setOwnerFilter("Todos");
+      void pushSync();
     } catch {
       // Ignore storage errors
     }
@@ -354,7 +722,29 @@ export function RenovationApp() {
   }
 
   if (onboardedState !== "1") {
-    return <OnboardingScreen onStartBlank={startBlankProject} />;
+    return (
+      <>
+        <OnboardingScreen
+          existingCount={projectsList.length}
+          onStartBlank={startBlankProject}
+          onOpenProjects={() => {
+            void fetchProjectsList();
+            setProjectsOpen(true);
+          }}
+        />
+        {projectsOpen && (
+          <ProjectsModal
+            projects={projectsList}
+            activeProjectId={getActiveProjectId()}
+            loading={loadingProjects}
+            onClose={() => setProjectsOpen(false)}
+            onSelectProject={(id) => void handleSelectProject(id)}
+            onCreateNew={() => setProjectsOpen(false)}
+            onDeleteProject={(id) => void handleDeleteProjectById(id)}
+          />
+        )}
+      </>
+    );
   }
 
   return (
@@ -366,18 +756,53 @@ export function RenovationApp() {
             <span className="text-[10px] uppercase tracking-[0.16em] text-[#6B6963]">
               Remodelación
             </span>
-            <button
-              type="button"
-              onClick={() => setSettingsOpen(true)}
-              className="p-1.5 text-[#6B6963] hover:text-[#141413] border border-transparent hover:border-[#E2E0DA]"
-              aria-label="Configuración"
-            >
-              <IconSliders className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => {
+                  void fetchProjectsList();
+                  setProjectsOpen(true);
+                }}
+                className="p-1.5 text-[#6B6963] hover:text-[#141413] border border-transparent hover:border-[#E2E0DA]"
+                aria-label="Proyectos"
+                title="Proyectos"
+              >
+                <IconFolder className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(true)}
+                className="p-1.5 text-[#6B6963] hover:text-[#141413] border border-transparent hover:border-[#E2E0DA]"
+                aria-label="Configuración"
+                title="Configuración"
+              >
+                <IconSliders className="w-4 h-4" />
+              </button>
+            </div>
           </div>
           <h1 className="text-base font-semibold tracking-tight text-[#141413] mt-1 truncate">
             {project.name}
           </h1>
+          <div className="flex items-center gap-1.5 mt-2">
+            <span
+              className={`w-1.5 h-1.5 ${
+                syncStatus === "synced"
+                  ? "bg-[#5A6B5C]"
+                  : syncStatus === "syncing"
+                  ? "bg-[#C28840]"
+                  : "bg-[#B85D3B]"
+              }`}
+            />
+            <span className="text-[10px] uppercase tracking-[0.1em] text-[#9E9B93]">
+              {syncStatus === "synced"
+                ? "Sincronizado"
+                : syncStatus === "syncing"
+                ? "Sincronizando"
+                : syncStatus === "offline"
+                ? "Local · Sin conexión"
+                : "Listo"}
+            </span>
+          </div>
         </div>
 
         <nav className="flex-1 p-4 space-y-1">
@@ -431,9 +856,20 @@ export function RenovationApp() {
       <header className="md:hidden sticky top-0 z-30 bg-[#F6F5F2] border-b border-[#E2E0DA] pt-safe">
         <div className="flex items-center justify-between px-4 h-14">
           <div className="min-w-0">
-            <span className="text-[9px] uppercase tracking-[0.16em] text-[#6B6963] block leading-none">
-              Remodelación
-            </span>
+            <div className="flex items-center gap-1.5">
+              <span
+                className={`w-1.5 h-1.5 ${
+                  syncStatus === "synced"
+                    ? "bg-[#5A6B5C]"
+                    : syncStatus === "syncing"
+                    ? "bg-[#C28840]"
+                    : "bg-[#B85D3B]"
+                }`}
+              />
+              <span className="text-[9px] uppercase tracking-[0.16em] text-[#6B6963] block leading-none">
+                {syncStatus === "offline" ? "Local · Sin red" : "Remodelación"}
+              </span>
+            </div>
             <h1 className="text-sm font-semibold tracking-tight text-[#141413] truncate mt-1">
               {project.name}
             </h1>
@@ -447,6 +883,17 @@ export function RenovationApp() {
                 {formatCOP(totals.granTotal)}
               </span>
             </div>
+            <button
+              type="button"
+              onClick={() => {
+                void fetchProjectsList();
+                setProjectsOpen(true);
+              }}
+              className="w-9 h-9 bg-white border border-[#E2E0DA] flex items-center justify-center text-[#141413]"
+              aria-label="Proyectos"
+            >
+              <IconFolder className="w-4 h-4" />
+            </button>
             <button
               type="button"
               onClick={() => setSettingsOpen(true)}
@@ -700,7 +1147,9 @@ export function RenovationApp() {
                             </div>
                             <div className="text-[11px] text-[#6B6963] mt-0.5">
                               {item.category}
-                              {item.paymentMethod ? ` · ${item.paymentMethod}` : ""}
+                              {item.paymentMethod
+                                ? ` · ${formatPaymentBadge(item.paymentMethod, item.paymentOwner)}`
+                                : ""}
                             </div>
                           </div>
                           <div className="flex items-center gap-2 shrink-0">
@@ -759,7 +1208,7 @@ export function RenovationApp() {
                   </div>
                 </div>
 
-                {/* Category Chips */}
+                {/* Category & Owner Chips */}
                 <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
                   {["Todas", ...existingCategories].map((cat) => {
                     const active = categoryFilter === cat;
@@ -779,6 +1228,31 @@ export function RenovationApp() {
                     );
                   })}
                 </div>
+
+                {allOwnersInExpenses.length > 0 && (
+                  <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pt-1 border-t border-[#E2E0DA]">
+                    <span className="text-[10px] uppercase tracking-[0.12em] text-[#9E9B93] shrink-0 mr-1">
+                      Titular:
+                    </span>
+                    {["Todos", ...allOwnersInExpenses].map((own) => {
+                      const active = ownerFilter === own;
+                      return (
+                        <button
+                          key={own}
+                          type="button"
+                          onClick={() => setOwnerFilter(own)}
+                          className={`shrink-0 px-2.5 h-7 text-[11px] border transition-colors ${
+                            active
+                              ? "bg-[#B85D3B] text-white border-[#B85D3B]"
+                              : "bg-white text-[#6B6963] border-[#E2E0DA] hover:text-[#141413]"
+                          }`}
+                        >
+                          {own}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               {/* Grouped Expense List */}
@@ -836,7 +1310,7 @@ export function RenovationApp() {
                                   <>
                                     <span>·</span>
                                     <span className="uppercase tracking-[0.06em] text-[#2C4A52] font-medium">
-                                      {item.paymentMethod}
+                                      {formatPaymentBadge(item.paymentMethod, item.paymentOwner)}
                                     </span>
                                   </>
                                 )}
@@ -867,7 +1341,7 @@ export function RenovationApp() {
           {/* TAB 3: ANÁLISIS */}
           {activeTab === "analisis" && (
             <div className="space-y-5">
-              {/* Two Pie/Donut Charts */}
+              {/* Three Pie/Donut Charts */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
                 <DonutChart
                   title="Distribución por rubro"
@@ -876,6 +1350,10 @@ export function RenovationApp() {
                 <DonutChart
                   title="Distribución por categoría"
                   slices={categorySlices}
+                />
+                <DonutChart
+                  title="Propio vs otra persona"
+                  slices={ownerSlices}
                 />
               </div>
 
@@ -1048,6 +1526,7 @@ export function RenovationApp() {
           item={editingItem}
           existingCategories={existingCategories}
           existingPaymentMethods={existingPaymentMethods}
+          existingOwners={existingOwners}
           onClose={() => {
             setModalOpen(false);
             setEditingItem(null);
@@ -1067,6 +1546,22 @@ export function RenovationApp() {
           onExportBackup={() => exportBackupJSON(project, expenses)}
           onImportBackup={handleImportBackup}
           onResetData={handleResetData}
+        />
+      )}
+
+      {projectsOpen && (
+        <ProjectsModal
+          projects={projectsList}
+          activeProjectId={getActiveProjectId()}
+          loading={loadingProjects}
+          onClose={() => setProjectsOpen(false)}
+          onSelectProject={(id) => void handleSelectProject(id)}
+          onCreateNew={() => {
+            setProjectsOpen(false);
+            localStorage.removeItem(STORAGE_ONBOARDED_KEY);
+            window.dispatchEvent(new Event(STORAGE_EVENT));
+          }}
+          onDeleteProject={(id) => void handleDeleteProjectById(id)}
         />
       )}
     </div>

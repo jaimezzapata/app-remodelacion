@@ -13,6 +13,7 @@ interface ExpenseModalProps {
   item: ExpenseItem | null;
   existingCategories: string[];
   existingPaymentMethods: string[];
+  existingOwners: string[];
   onClose: () => void;
   onSave: (item: ExpenseItem) => void;
   onDelete?: (id: string) => void;
@@ -25,6 +26,7 @@ export function ExpenseModal({
   item,
   existingCategories,
   existingPaymentMethods,
+  existingOwners,
   onClose,
   onSave,
   onDelete,
@@ -49,7 +51,16 @@ export function ExpenseModal({
   );
   const [status, setStatus] = useState<ExpenseStatus>(item?.status ?? "pagado");
   const [paymentMethod, setPaymentMethod] = useState(
-    item?.paymentMethod || "Transferencia"
+    item?.paymentMethod || "TC"
+  );
+  const initialIsOther = Boolean(
+    item?.paymentOwner && item.paymentOwner !== "Propio"
+  );
+  const [ownerType, setOwnerType] = useState<"propio" | "otro">(
+    initialIsOther ? "otro" : "propio"
+  );
+  const [ownerName, setOwnerName] = useState(
+    initialIsOther ? item?.paymentOwner ?? "" : ""
   );
   const [date, setDate] = useState(
     item?.date ?? new Date().toISOString().slice(0, 10)
@@ -89,6 +100,13 @@ export function ExpenseModal({
     const finalStatus: ExpenseStatus =
       parsedAmount === 0 ? "pendiente" : status;
 
+    const finalOwner =
+      finalStatus === "pendiente"
+        ? undefined
+        : ownerType === "propio"
+        ? "Propio"
+        : ownerName.trim() || "Otra persona";
+
     onSave({
       id: item?.id ?? `exp-${Date.now()}`,
       name: finalName,
@@ -99,6 +117,7 @@ export function ExpenseModal({
       amount: finalStatus === "pendiente" ? 0 : parsedAmount,
       paymentMethod:
         finalStatus === "pendiente" ? "" : paymentMethod.trim() || "Efectivo",
+      paymentOwner: finalOwner,
       status: finalStatus,
       date,
       note: note.trim() || undefined,
@@ -329,38 +348,100 @@ export function ExpenseModal({
             </div>
           </div>
 
-          {/* Método de pago */}
+          {/* Método de pago y Titular */}
           {status === "pagado" && (
-            <div>
-              <label className="block text-[10px] uppercase tracking-[0.14em] text-[#6B6963] mb-1.5">
-                Método de pago
-              </label>
-              <div className="flex flex-wrap gap-1.5 mb-2">
-                {paymentMethods.map((pm) => {
-                  const active = paymentMethod === pm;
-                  return (
-                    <button
-                      key={pm}
-                      type="button"
-                      onClick={() => setPaymentMethod(pm)}
-                      className={`px-3 h-8 text-xs border transition-colors ${
-                        active
-                          ? "bg-[#2C4A52] text-white border-[#2C4A52]"
-                          : "bg-white text-[#6B6963] border-[#E2E0DA]"
-                      }`}
-                    >
-                      {pm}
-                    </button>
-                  );
-                })}
+            <div className="space-y-3">
+              <div>
+                <label className="block text-[10px] uppercase tracking-[0.14em] text-[#6B6963] mb-1.5">
+                  Medio de pago
+                </label>
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {paymentMethods.map((pm) => {
+                    const active = paymentMethod === pm;
+                    return (
+                      <button
+                        key={pm}
+                        type="button"
+                        onClick={() => setPaymentMethod(pm)}
+                        className={`px-3 h-8 text-xs border transition-colors ${
+                          active
+                            ? "bg-[#2C4A52] text-white border-[#2C4A52]"
+                            : "bg-white text-[#6B6963] border-[#E2E0DA]"
+                        }`}
+                      >
+                        {pm}
+                      </button>
+                    );
+                  })}
+                </div>
+                <input
+                  type="text"
+                  value={paymentMethod}
+                  onChange={(e) => setPaymentMethod(e.target.value)}
+                  placeholder="O escribe otro medio de pago"
+                  className="w-full h-10 px-3 bg-white border border-[#E2E0DA] focus:border-[#141413] outline-none text-xs text-[#141413]"
+                />
               </div>
-              <input
-                type="text"
-                value={paymentMethod}
-                onChange={(e) => setPaymentMethod(e.target.value)}
-                placeholder="O escribe otro método de pago"
-                className="w-full h-10 px-3 bg-white border border-[#E2E0DA] focus:border-[#141413] outline-none text-xs text-[#141413]"
-              />
+
+              <div>
+                <label className="block text-[10px] uppercase tracking-[0.14em] text-[#6B6963] mb-1.5">
+                  Titular / Responsable
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setOwnerType("propio")}
+                    className={`h-10 text-xs font-medium border transition-colors ${
+                      ownerType === "propio"
+                        ? "bg-[#141413] text-white border-[#141413]"
+                        : "bg-white text-[#6B6963] border-[#E2E0DA]"
+                    }`}
+                  >
+                    Propio
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOwnerType("otro")}
+                    className={`h-10 text-xs font-medium border transition-colors ${
+                      ownerType === "otro"
+                        ? "bg-[#B85D3B] text-white border-[#B85D3B]"
+                        : "bg-white text-[#6B6963] border-[#E2E0DA]"
+                    }`}
+                  >
+                    Otra persona
+                  </button>
+                </div>
+
+                {ownerType === "otro" && (
+                  <div className="mt-2 space-y-2">
+                    {existingOwners.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5">
+                        {existingOwners.map((person) => (
+                          <button
+                            key={person}
+                            type="button"
+                            onClick={() => setOwnerName(person)}
+                            className={`px-2.5 h-7 text-[11px] border transition-colors ${
+                              ownerName === person
+                                ? "bg-[#B85D3B] text-white border-[#B85D3B]"
+                                : "bg-white text-[#6B6963] border-[#E2E0DA]"
+                            }`}
+                          >
+                            {person}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <input
+                      type="text"
+                      value={ownerName}
+                      onChange={(e) => setOwnerName(e.target.value)}
+                      placeholder="Nombre de la persona (ej: Sandra)"
+                      className="w-full h-10 px-3 bg-white border border-[#141413] outline-none text-xs text-[#141413]"
+                    />
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

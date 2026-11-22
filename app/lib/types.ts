@@ -11,6 +11,7 @@ export interface ExpenseItem {
   unit: string;
   amount: number;
   paymentMethod: string;
+  paymentOwner?: string;
   status: ExpenseStatus;
   date: string;
   note?: string;
