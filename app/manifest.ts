@@ -1,0 +1,26 @@
+import type { MetadataRoute } from "next";
+
+export default function manifest(): MetadataRoute.Manifest {
+  return {
+    name: "Obra — Control de Remodelación",
+    short_name: "Obra",
+    description: "Control de gastos y presupuesto de remodelación",
+    start_url: "/",
+    display: "standalone",
+    orientation: "portrait",
+    background_color: "#F6F5F2",
+    theme_color: "#F6F5F2",
+    icons: [
+      {
+        src: "/icon-192.png",
+        sizes: "192x192",
+        type: "image/png",
+      },
+      {
+        src: "/icon-512.png",
+        sizes: "512x512",
+        type: "image/png",
+      },
+    ],
+  };
+}
